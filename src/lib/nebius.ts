@@ -14,8 +14,8 @@ import { ServerConfig } from './config';
 export async function callNemotron(
   config: ServerConfig,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  temperature: number = 0.2,
-  maxTokens: number = 2048,
+  temperature: number = 0.1,
+  maxTokens: number = 8192,
   jsonMode: boolean = true
 ): Promise<string> {
   const { nebiusApiKey, nebiusBaseUrl, nebiusModelId } = config;
@@ -42,7 +42,7 @@ export async function callNemotron(
   let response: Response;
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s safety timeout
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s safety timeout
 
     response = await fetch(endpoint, {
       method: 'POST',
@@ -57,7 +57,7 @@ export async function callNemotron(
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Nebius Timeout Blocker: Request to ${endpoint} timed out after 45 seconds.`);
+      throw new Error(`Nebius Timeout Blocker: Request to ${endpoint} timed out after 60 seconds.`);
     }
     throw new Error(`Nebius Connection Blocker: Failed to reach Nebius endpoint at ${endpoint}: ${msg}`);
   }
@@ -94,11 +94,22 @@ export async function callNemotron(
   }
 
   const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
+  const choice = data?.choices?.[0];
+  const message = choice?.message;
 
-  if (typeof content !== 'string' || content.trim() === '') {
+  // Prefer actual assistant content
+  let content: string | null = null;
+  if (typeof message?.content === 'string' && message.content.trim() !== '') {
+    content = message.content;
+  } else if (typeof message?.reasoning === 'string' && message.reasoning.trim() !== '') {
+    content = message.reasoning;
+  } else if (typeof message?.reasoning_content === 'string' && message.reasoning_content.trim() !== '') {
+    content = message.reasoning_content;
+  }
+
+  if (!content) {
     throw new Error(
-      `Nebius Model Blocker: Empty response received from model ${nebiusModelId}. Response body: ${JSON.stringify(data)}`
+      `Nebius Model Blocker: Empty response received from model ${nebiusModelId} (finish_reason: ${choice?.finish_reason}). Tokens: ${JSON.stringify(data?.usage)}`
     );
   }
 
@@ -106,15 +117,60 @@ export async function callNemotron(
 }
 
 /**
- * Extracts and parses JSON from raw model string
+ * Robustly extracts and parses JSON from raw model string, handling
+ * potential thinking/reasoning blocks, markdown fences, and leading/trailing text.
  */
-function extractAndParseJson(raw: string): unknown {
-  let cleaned = raw.trim();
-  // Strip markdown code fences if model enclosed JSON in ```json ... ```
-  if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+function extractAndParseJson(raw: string, requiredKey?: string): unknown {
+  const trimmed = raw.trim();
+
+  // 1. Try direct JSON.parse
+  try {
+    const direct = JSON.parse(trimmed);
+    if (!requiredKey || (direct && typeof direct === 'object' && requiredKey in direct)) {
+      return direct;
+    }
+  } catch {}
+
+  // 2. Try extracting from markdown ```json ... ``` code fences
+  const fenceMatches = Array.from(trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/gi));
+  for (const m of fenceMatches) {
+    try {
+      const parsed = JSON.parse(m[1].trim());
+      if (!requiredKey || (parsed && typeof parsed === 'object' && requiredKey in parsed)) {
+        return parsed;
+      }
+    } catch {}
   }
-  return JSON.parse(cleaned);
+
+  // 3. Search from outermost opening brace to find root JSON object
+  const starts: number[] = [];
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed[i] === '{') starts.push(i);
+  }
+  const ends: number[] = [];
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed[i] === '}') ends.push(i);
+  }
+
+  // Test candidate pairs prioritizing outermost bounds
+  for (let s = 0; s < starts.length; s++) {
+    for (let e = ends.length - 1; e >= s; e--) {
+      if (ends[e] > starts[s]) {
+        const candidate = trimmed.substring(starts[s], ends[e] + 1);
+        try {
+          const parsed = JSON.parse(candidate);
+          if (parsed && typeof parsed === 'object') {
+            if (!requiredKey || requiredKey in parsed) {
+              return parsed;
+            }
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // Fallback to throw standard SyntaxError with full context
+  return JSON.parse(trimmed);
 }
 
 /**
@@ -127,41 +183,23 @@ export async function draftAnswerAndClaims(
   config: ServerConfig
 ): Promise<ModelDraftResponse> {
   const sourcesContext = sources
-    .map(
-      (s, idx) =>
-        `SOURCE ${idx + 1}:
-Title: ${s.title}
-URL: ${s.url}
-Text Content:
-${s.content ? s.content.slice(0, 3000) : s.snippet}`
-    )
-    .join('\n\n====================\n\n');
+    .map((s, idx) => {
+      const compactText = (s.snippet || '')
+        .split(/(?<=[.?!])\s+/)
+        .slice(0, 3)
+        .join(' ')
+        .slice(0, 350);
+      return `SOURCE ${idx + 1}:\nTitle: ${s.title}\nURL: ${s.url}\nExcerpt: ${compactText}`;
+    })
+    .join('\n\n');
 
-  const systemPrompt = `You are FlowPilot Verify, powered by NVIDIA Nemotron-3.5-Lightning.
-Your goal is to answer research questions based strictly on the provided web sources and extract discrete, verifiable claims.
+  const systemPrompt = `You are FlowPilot Verify. Output JSON only:
+{"answer":"string","claims":[{"id":"claim-1","claimText":"string","candidateQuote":"string","sourceUrl":"string"}],"limitations":"string"}
 
-CRITICAL INSTRUCTIONS:
-1. Synthesize a comprehensive, factual answer (2-4 paragraphs) to the user's question using ONLY facts from the provided sources.
-2. Extract between 2 and 6 discrete, atomic factual claims made in your answer.
-3. For each claim:
-   - "claimText": The specific factual statement.
-   - "candidateQuote": A verbatim excerpt from the source text that directly supports this claim. This MUST be an exact quote from the text content of the source.
-   - "sourceUrl": The exact URL of the source where the candidate quote appears.
-4. "limitations": A short summary of any gaps, contradictory info, or missing aspects in the retrieved sources.
-5. You MUST return strictly valid JSON matching this exact structure:
-{
-  "answer": "string",
-  "claims": [
-    {
-      "id": "claim-1",
-      "claimText": "string",
-      "candidateQuote": "string",
-      "sourceUrl": "string"
-    }
-  ],
-  "limitations": "string"
-}
-Do not include any prose outside the JSON.`;
+Rules:
+- Answer the research question factually using the provided sources.
+- Extract between 2 and 6 atomic claims.
+- For each claim, candidateQuote MUST be an exact verbatim excerpt from the source text, and sourceUrl MUST be the source's exact URL.`;
 
   const userPrompt = `Research Question: "${question}"
 
@@ -175,7 +213,7 @@ ${sourcesContext}`;
 
   let parsedJson: unknown;
   try {
-    parsedJson = extractAndParseJson(rawOutput);
+    parsedJson = extractAndParseJson(rawOutput, 'answer');
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -217,31 +255,13 @@ export async function evaluateClaimSemantics(
     sourceUrl: c.sourceUrl,
   }));
 
-  const systemPrompt = `You are FlowPilot Verify's Semantic Evaluation Engine powered by NVIDIA Nemotron-3.5-Lightning.
-Your role: "Code verifies provenance. Nemotron evaluates meaning."
+  const systemPrompt = `You are FlowPilot Verify. Output JSON only:
+{"verdicts":[{"claimId":"string","verdict":"Supported"|"Contradicted"|"Insufficient Evidence","confidence":number,"explanation":"string"}]}
 
-The provided claims have already passed deterministic quote provenance verification in server code.
-Now, evaluate whether the evidence quote semantically and logically supports the claim text.
-
-For each claim, assign one of three verdicts:
-- "Supported": The evidence quote logically proves or substantiates the claim text.
-- "Contradicted": The evidence quote contradicts, refutes, or directly conflicts with the claim text.
-- "Insufficient Evidence": The evidence quote is related, but does not provide enough factual backing to definitively verify the claim.
-
-Assign a confidence score (0 to 100) and provide a concise, sharp explanation of why this verdict applies.
-
-OUTPUT MUST BE VALID JSON:
-{
-  "verdicts": [
-    {
-      "claimId": "string",
-      "verdict": "Supported" | "Contradicted" | "Insufficient Evidence",
-      "confidence": number,
-      "explanation": "string"
-    }
-  ]
-}
-No extra text or markdown.`;
+Rules:
+- Evaluate whether the evidence quote semantically supports the claim text.
+- verdict must be one of: "Supported", "Contradicted", "Insufficient Evidence".
+- confidence between 0 and 100 with concise explanation.`;
 
   const userPrompt = `Evaluate the following claims against their verified evidence quotes:
 ${JSON.stringify(claimsPayload, null, 2)}`;
@@ -253,7 +273,7 @@ ${JSON.stringify(claimsPayload, null, 2)}`;
 
   let parsedJson: unknown;
   try {
-    parsedJson = extractAndParseJson(rawOutput);
+    parsedJson = extractAndParseJson(rawOutput, 'verdicts');
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
