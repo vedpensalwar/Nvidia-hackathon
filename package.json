@@ -1,0 +1,29 @@
+{
+  "name": "flowpilot-verify",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "dependencies": {
+    "autoprefixer": "^10.6.2",
+    "lucide-react": "^0.475.0",
+    "next": "^15.1.0",
+    "postcss": "^8.5.32",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^3.4.19",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.0"
+  }
+}
