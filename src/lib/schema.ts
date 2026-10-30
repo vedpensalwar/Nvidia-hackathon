@@ -10,6 +10,15 @@ export const ResearchRequestSchema = z.object({
 
 export type ResearchRequest = z.infer<typeof ResearchRequestSchema>;
 
+// Schema for Nemotron Research Plan
+export const ResearchPlanSchema = z.object({
+  searchQueries: z.array(z.string().min(2)).min(1).max(3),
+  focusAreas: z.array(z.string().min(2)).min(1).max(5),
+  methodologyNotes: z.string().optional().default(''),
+});
+
+export type ResearchPlan = z.infer<typeof ResearchPlanSchema>;
+
 // Schema for raw model drafting response
 export const ModelDraftClaimSchema = z.object({
   id: z.string().default(() => Math.random().toString(36).substring(2, 9)),
@@ -68,7 +77,9 @@ export interface ResearchSource {
 
 export interface ResearchApiResponse {
   question: string;
+  plan?: ResearchPlan;
   answer: string;
+  findingsSummary?: string;
   sources: ResearchSource[];
   claims: VerifiedClaim[];
   summary: {

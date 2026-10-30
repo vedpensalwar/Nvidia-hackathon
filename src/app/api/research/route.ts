@@ -6,7 +6,12 @@ import {
 } from '@/lib/schema';
 import { checkServerCredentials, getServerConfig } from '@/lib/config';
 import { fetchTavilyResearchSources } from '@/lib/tavily';
-import { draftAnswerAndClaims, evaluateClaimSemantics } from '@/lib/nebius';
+import {
+  generateResearchPlan,
+  draftAnswerAndClaims,
+  evaluateClaimSemantics,
+  computeFindingsSummary,
+} from '@/lib/nebius';
 import { checkQuoteProvenance } from '@/lib/provenance';
 
 export const maxDuration = 60; // Up to 60 seconds for serverless functions on Vercel Pro/Hobby
@@ -48,8 +53,14 @@ export async function POST(req: NextRequest) {
 
     const config = getServerConfig();
 
-    // 3. Retrieve up to 3 web sources from Tavily
-    const sources = await fetchTavilyResearchSources(question, config.tavilyApiKey, 3);
+    // Step 2: Use Nemotron to produce a concise research plan
+    const plan = await generateResearchPlan(question, config);
+
+    // Step 3 & 4: Retrieve relevant web sources through Tavily using targeted search query
+    const searchQuery = (plan.searchQueries && plan.searchQueries.length > 0)
+      ? plan.searchQueries[0]
+      : question;
+    const sources = await fetchTavilyResearchSources(searchQuery, config.tavilyApiKey, 3);
 
     if (sources.length === 0) {
       return NextResponse.json(
@@ -61,7 +72,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. Draft answer and extract up to 6 discrete claims using NVIDIA Nemotron-3.5-Lightning
+    // Step 5, 6, 7: Generate draft answer, extract discrete claims, associate candidate quote & source URL
     const draftResponse = await draftAnswerAndClaims(question, sources, config);
 
     // 5. Deterministic Code Provenance Checks
@@ -142,9 +153,17 @@ export async function POST(req: NextRequest) {
     const provenancePassCount = initialClaims.filter((c) => c.provenance.isValid).length;
     const provenancePassRate = totalClaims > 0 ? Math.round((provenancePassCount / totalClaims) * 100) : 0;
 
+    const findingsSummary = computeFindingsSummary(
+      draftResponse.answer,
+      initialClaims,
+      draftResponse.limitations
+    );
+
     const responsePayload: ResearchApiResponse = {
       question,
+      plan,
       answer: draftResponse.answer,
+      findingsSummary,
       sources,
       claims: initialClaims,
       summary: {

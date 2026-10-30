@@ -17,15 +17,9 @@ export async function GET() {
       configured: nebiusConfigured,
       baseUrl: config.nebiusBaseUrl,
       modelId: config.nebiusModelId,
-      keyPreview: nebiusConfigured
-        ? `${config.nebiusApiKey.slice(0, 4)}...${config.nebiusApiKey.slice(-4)}`
-        : 'NOT_SET',
     },
     tavily: {
       configured: tavilyConfigured,
-      keyPreview: tavilyConfigured
-        ? `${config.tavilyApiKey.slice(0, 4)}...${config.tavilyApiKey.slice(-4)}`
-        : 'NOT_SET',
     },
     system: {
       nodeVersion: process.version,

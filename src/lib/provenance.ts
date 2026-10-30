@@ -41,6 +41,35 @@ export function normalizeUrl(url: string): string {
     .replace(/\/+$/, '');
 }
 
+/**
+ * Verifies whether a candidate URL is present in the allowlisted retrieved sources.
+ */
+export function isUrlAllowlisted(
+  candidateUrl: string,
+  retrievedSources: ResearchSource[]
+): { isAllowed: boolean; matchedSource: ResearchSource | null } {
+  const normCandidate = normalizeUrl(candidateUrl);
+  if (!normCandidate) {
+    return { isAllowed: false, matchedSource: null };
+  }
+
+  const matched = retrievedSources.find((s) => {
+    const normSource = normalizeUrl(s.url);
+    if (!normSource) return false;
+    return (
+      normSource === normCandidate ||
+      normSource.split('#')[0].split('?')[0] === normCandidate.split('#')[0].split('?')[0] ||
+      (normCandidate.length > 8 && normSource.includes(normCandidate)) ||
+      (normSource.length > 8 && normCandidate.includes(normSource))
+    );
+  });
+
+  return {
+    isAllowed: Boolean(matched),
+    matchedSource: matched || null,
+  };
+}
+
 export interface ProvenanceCheckResult {
   isValid: boolean;
   matchType: 'EXACT' | 'NORMALIZED' | 'NOT_FOUND';
@@ -71,18 +100,9 @@ export function checkQuoteProvenance(
     };
   }
 
-  // 1. Verify source URL against retrieved source set
-  const normCandidateUrl = normalizeUrl(trimmedUrl);
-  const matchedSource = retrievedSources.find((s) => {
-    const normSourceUrl = normalizeUrl(s.url);
-    return (
-      normSourceUrl === normCandidateUrl ||
-      normSourceUrl.includes(normCandidateUrl) ||
-      normCandidateUrl.includes(normSourceUrl)
-    );
-  });
-
-  const sourceUrlValid = Boolean(matchedSource);
+  // 1. Verify source URL against retrieved source set via allowlisting
+  const { isAllowed, matchedSource } = isUrlAllowlisted(trimmedUrl, retrievedSources);
+  const sourceUrlValid = isAllowed;
 
   // If source URL isn't in our retrieved sources, fail immediately
   if (!matchedSource) {

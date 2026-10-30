@@ -23,6 +23,9 @@ export async function fetchTavilyResearchSources(
   };
 
   let response: Response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
+
   try {
     response = await fetch(endpoint, {
       method: 'POST',
@@ -30,9 +33,15 @@ export async function fetchTavilyResearchSources(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
   } catch (err: unknown) {
+    clearTimeout(timeoutId);
     const msg = err instanceof Error ? err.message : String(err);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`Tavily Timeout Blocker: Request to ${endpoint} timed out after 25 seconds.`);
+    }
     throw new Error(`Tavily Network Blocker: Failed to reach ${endpoint}: ${msg}`);
   }
 
@@ -68,9 +77,9 @@ export async function fetchTavilyResearchSources(
   }
 
   return data.results.slice(0, 3).map((item: Record<string, unknown>) => ({
-    title: String(item.title || 'Untitled Source'),
-    url: String(item.url || ''),
-    snippet: String(item.content || ''),
-    content: String(item.raw_content || item.content || ''),
+    title: String(item.title || 'Untitled Source').slice(0, 250),
+    url: String(item.url || '').slice(0, 1000),
+    snippet: String(item.content || '').slice(0, 2000),
+    content: String(item.raw_content || item.content || '').slice(0, 50000),
   }));
 }
